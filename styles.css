@@ -216,12 +216,32 @@ input:focus-visible,
   color: var(--text);
 }
 
-.reading-stage {
-  position: relative;
-  display: grid;
-  min-width: 0;
-  place-items: center;
-  isolation: isolate;
+.reading-content {
+  position: absolute;
+  top: calc(50% - 3rem);
+  left: 50%;
+  z-index: 1;
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  transform: translate(-50%, -50%);
+}
+
+.previous-context {
+  position: static;
+  width: min(90%, 46rem);
+  margin: 0 0 0.85rem;
+  overflow: hidden;
+  transform: none;
+  color: #7d8798;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(0.82rem, 2vw, 1.15rem);
+  letter-spacing: 0.01em;
+  line-height: 1.35;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .word-display {
@@ -429,6 +449,15 @@ input:focus-visible,
   .word-display {
     padding-inline: 0.75rem;
     font-size: clamp(2.65rem, 14vw, 5rem);
+  }
+
+  .reading-content {
+    top: calc(50% - 2rem);
+  }
+
+  .previous-context {
+    width: min(92%, 34rem);
+    font-size: 0.82rem;
   }
 
   .focus-line {

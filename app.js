@@ -6,6 +6,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 const DEFAULT_SPEED = 300;
 const MIN_SPEED = 100;
 const MAX_SPEED = 800;
+const CONTEXT_WORD_COUNT = 6;
 const SETTINGS_KEY = "lector-focal:velocidad";
 const BOOK_STORAGE_PREFIX = "lector-focal:libro:";
 const DATABASE_NAME = "lector-focal";
@@ -23,6 +24,7 @@ const uploadStatus = document.querySelector("#upload-status");
 const bookTitle = document.querySelector("#book-title");
 const bookMeta = document.querySelector("#book-meta");
 const wordDisplay = document.querySelector("#word-display");
+const previousContext = document.querySelector("#previous-context");
 const completionMessage = document.querySelector("#completion-message");
 const positionLabel = document.querySelector("#position-label");
 const progressPercent = document.querySelector("#progress-percent");
@@ -380,12 +382,21 @@ function renderReader() {
     totalWords === 1 ? 100 : (state.currentIndex / (totalWords - 1)) * 100;
 
   wordDisplay.textContent = state.words[state.currentIndex];
+  renderPreviousContext();
   positionLabel.textContent = `Palabra ${numberFormatter.format(state.currentIndex + 1)} de ${numberFormatter.format(totalWords)}`;
   progressPercent.textContent = `${Math.round(progress)} %`;
   progressControl.value = String(state.currentIndex);
   progressControl.style.setProperty("--progress", `${progress}%`);
   completionMessage.hidden = state.isPlaying || state.currentIndex < totalWords - 1;
   updatePlaybackButton();
+}
+
+function renderPreviousContext() {
+  const contextStart = Math.max(0, state.currentIndex - CONTEXT_WORD_COUNT);
+  const contextWords = state.words.slice(contextStart, state.currentIndex);
+
+  previousContext.textContent = contextWords.join(" ");
+  previousContext.hidden = contextWords.length === 0;
 }
 
 function updatePlaybackButton() {

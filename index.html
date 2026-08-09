@@ -42,7 +42,10 @@
 
         <div class="reading-stage" aria-label="Palabra actual">
           <span class="focus-line focus-line--left" aria-hidden="true"></span>
-          <p id="word-display" class="word-display">Listo</p>
+          <div class="reading-content">
+            <p id="previous-context" class="previous-context" aria-hidden="true" hidden></p>
+            <p id="word-display" class="word-display">Listo</p>
+          </div>
           <span class="focus-line focus-line--right" aria-hidden="true"></span>
           <p id="completion-message" class="completion-message" hidden>
             Has llegado al final del libro.
