@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Lector de PDF palabra por palabra que funciona directamente en tu navegador.">
+    <title>Lector focal</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <section id="upload-view" class="upload-view" aria-labelledby="upload-title">
+        <div class="brand-mark" aria-hidden="true">LF</div>
+        <p class="eyebrow">Lector focal</p>
+        <h1 id="upload-title">Lee sin mover la mirada.</h1>
+        <p class="intro">
+          Elige un PDF y deja que cada palabra llegue hasta ti, una a una.
+        </p>
+
+        <input id="pdf-input" class="visually-hidden" type="file" accept="application/pdf,.pdf">
+        <label class="file-picker" for="pdf-input">
+          <span class="file-picker__title">Seleccionar un libro</span>
+          <span class="file-picker__hint">PDF con texto seleccionable</span>
+        </label>
+
+        <p id="upload-status" class="upload-status" role="status" aria-live="polite"></p>
+        <p class="privacy-note">
+          Tu libro se procesa en este dispositivo y no se envía a ningún servidor.
+        </p>
+      </section>
+
+      <section id="reader-view" class="reader-view" aria-labelledby="book-title" hidden>
+        <header class="reader-header">
+          <div class="book-details">
+            <p class="eyebrow">Leyendo ahora</p>
+            <h1 id="book-title" class="book-title">Libro</h1>
+            <p id="book-meta" class="book-meta"></p>
+          </div>
+          <button id="change-book" class="text-button" type="button">Cambiar PDF</button>
+        </header>
+
+        <div class="reading-stage" aria-label="Palabra actual">
+          <span class="focus-line focus-line--left" aria-hidden="true"></span>
+          <p id="word-display" class="word-display">Listo</p>
+          <span class="focus-line focus-line--right" aria-hidden="true"></span>
+          <p id="completion-message" class="completion-message" hidden>
+            Has llegado al final del libro.
+          </p>
+        </div>
+
+        <div class="reader-panel">
+          <div class="progress-copy">
+            <span id="position-label">Palabra 1 de 1</span>
+            <span id="progress-percent">0 %</span>
+          </div>
+          <input
+            id="progress-control"
+            class="progress-control"
+            type="range"
+            min="0"
+            max="0"
+            value="0"
+            aria-label="Posición en el libro"
+          >
+
+          <div class="playback-controls" aria-label="Controles de lectura">
+            <button id="back-button" class="control-button" type="button" aria-label="Retroceder 10 palabras">
+              −10
+            </button>
+            <button id="play-button" class="play-button" type="button">Leer</button>
+            <button id="forward-button" class="control-button" type="button" aria-label="Avanzar 10 palabras">
+              +10
+            </button>
+          </div>
+
+          <div class="speed-setting">
+            <div class="speed-heading">
+              <label for="speed-control">Velocidad</label>
+              <output id="speed-output" for="speed-control">300 palabras/min</output>
+            </div>
+            <input
+              id="speed-control"
+              class="speed-control"
+              type="range"
+              min="100"
+              max="800"
+              step="25"
+              value="300"
+            >
+          </div>
+
+          <p class="keyboard-hint">
+            Espacio para pausar o continuar · Flechas para avanzar o retroceder
+          </p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
