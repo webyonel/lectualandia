@@ -8,7 +8,13 @@ const MIN_SPEED = 100;
 const MAX_SPEED = 800;
 const SETTINGS_KEY = "lector-focal:velocidad";
 const BOOK_STORAGE_PREFIX = "lector-focal:libro:";
+const DATABASE_NAME = "lector-focal";
+const DATABASE_VERSION = 1;
+const BOOK_STORE_NAME = "books";
+const LAST_BOOK_KEY = "lector-focal:ultimo-libro";
 const numberFormatter = new Intl.NumberFormat("es-ES");
+
+let databasePromise;
 
 const uploadView = document.querySelector("#upload-view");
 const readerView = document.querySelector("#reader-view");
@@ -75,6 +81,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 window.addEventListener("beforeunload", saveBookProgress);
+void restoreLastBook();
 
 async function handleFileSelection(event) {
   const [file] = event.target.files;
@@ -127,7 +134,22 @@ async function handleFileSelection(event) {
       throw new Error("NO_EXTRACTABLE_TEXT");
     }
 
-    openBook(file, words, pdfDocument.numPages);
+    const storageKey = createBookStorageKey(file);
+
+    try {
+      await saveBookRecord({
+        id: storageKey,
+        name: file.name,
+        size: file.size,
+        lastModified: file.lastModified,
+        pageCount: pdfDocument.numPages,
+        words,
+      });
+    } catch (storageError) {
+      console.warn("No se pudo guardar el libro localmente:", storageError);
+    }
+
+    openBook(file, words, pdfDocument.numPages, storageKey);
   } catch (error) {
     console.error("No se pudo abrir el PDF:", error);
 
@@ -231,13 +253,13 @@ function normalizeText(text) {
     .trim();
 }
 
-function openBook(file, words, pageCount) {
+function openBook(book, words, pageCount, storageKey = createBookStorageKey(book)) {
   state.words = words;
   state.pageCount = pageCount;
-  state.storageKey = createBookStorageKey(file);
+  state.storageKey = storageKey;
   state.currentIndex = loadBookProgress(state.storageKey, words.length);
 
-  bookTitle.textContent = file.name.replace(/\.pdf$/iu, "");
+  bookTitle.textContent = book.name.replace(/\.pdf$/iu, "");
   document.title = `${bookTitle.textContent} · Lector focal`;
   progressControl.max = String(words.length - 1);
 
@@ -436,6 +458,127 @@ function setUploadStatus(message, status = "loading") {
 
 function createBookStorageKey(file) {
   return `${BOOK_STORAGE_PREFIX}${file.name}:${file.size}:${file.lastModified}`;
+}
+
+async function restoreLastBook() {
+  const storageKey = readLastBookId();
+
+  if (!storageKey) {
+    return;
+  }
+
+  uploadView.setAttribute("aria-busy", "true");
+  fileInput.disabled = true;
+  setUploadStatus("Restaurando tu último libro…");
+
+  try {
+    const record = await getBookRecord(storageKey);
+
+    if (!record || !Array.isArray(record.words) || record.words.length === 0) {
+      throw new Error("BOOK_NOT_FOUND");
+    }
+
+    const pageCount = Number.isInteger(record.pageCount) && record.pageCount > 0
+      ? record.pageCount
+      : 1;
+
+    openBook(record, record.words, pageCount, storageKey);
+  } catch (error) {
+    console.warn("No se pudo restaurar el último libro:", error);
+    clearLastBookId();
+    setUploadStatus("No se pudo restaurar el libro. Selecciona el PDF de nuevo.", "error");
+  } finally {
+    uploadView.removeAttribute("aria-busy");
+    fileInput.disabled = false;
+    fileInput.value = "";
+  }
+}
+
+function openBookDatabase() {
+  if (databasePromise) {
+    return databasePromise;
+  }
+
+  if (!("indexedDB" in window)) {
+    return Promise.reject(new Error("INDEXED_DB_UNAVAILABLE"));
+  }
+
+  databasePromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+
+    request.onupgradeneeded = () => {
+      const database = request.result;
+
+      if (!database.objectStoreNames.contains(BOOK_STORE_NAME)) {
+        database.createObjectStore(BOOK_STORE_NAME, { keyPath: "id" });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  return databasePromise;
+}
+
+async function saveBookRecord(record) {
+  const database = await openBookDatabase();
+  const previousBookId = readLastBookId();
+
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(BOOK_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(BOOK_STORE_NAME);
+
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+
+    store.put(record);
+
+    if (previousBookId && previousBookId !== record.id) {
+      store.delete(previousBookId);
+    }
+  });
+
+  try {
+    window.localStorage.setItem(LAST_BOOK_KEY, record.id);
+
+    if (previousBookId && previousBookId !== record.id) {
+      window.localStorage.removeItem(previousBookId);
+    }
+  } catch (error) {
+    console.warn("No se pudo marcar el último libro local:", error);
+  }
+}
+
+function getBookRecord(storageKey) {
+  return openBookDatabase().then(
+    (database) =>
+      new Promise((resolve, reject) => {
+        const transaction = database.transaction(BOOK_STORE_NAME, "readonly");
+        const request = transaction.objectStore(BOOK_STORE_NAME).get(storageKey);
+
+        request.onsuccess = () => resolve(request.result ?? null);
+        request.onerror = () => reject(request.error);
+      }),
+  );
+}
+
+function readLastBookId() {
+  try {
+    return window.localStorage.getItem(LAST_BOOK_KEY);
+  } catch (error) {
+    console.warn("No se pudo leer el último libro local:", error);
+    return null;
+  }
+}
+
+function clearLastBookId() {
+  try {
+    window.localStorage.removeItem(LAST_BOOK_KEY);
+  } catch (error) {
+    console.warn("No se pudo borrar la referencia al libro local:", error);
+  }
 }
 
 function loadSavedSpeed() {
