@@ -35,6 +35,8 @@ const forwardButton = document.querySelector("#forward-button");
 const speedControl = document.querySelector("#speed-control");
 const speedOutput = document.querySelector("#speed-output");
 const changeBookButton = document.querySelector("#change-book");
+const tableOfContents = document.querySelector("#table-of-contents");
+const tableOfContentsList = document.querySelector("#table-of-contents-list");
 
 const state = {
   words: [],
@@ -44,6 +46,7 @@ const state = {
   timerId: null,
   storageKey: null,
   pageCount: 0,
+  chapters: [],
 };
 
 speedControl.value = String(state.wordsPerMinute);
@@ -120,12 +123,19 @@ async function handleFileSelection(event) {
 
     pdfDocument = await loadingTask.promise;
     const pageTexts = [];
+    const pageWordStarts = [];
+    let extractedWordCount = 0;
 
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
       setUploadStatus(`Extrayendo texto de la página ${pageNumber} de ${pdfDocument.numPages}…`);
       const page = await pdfDocument.getPage(pageNumber);
       const textContent = await page.getTextContent();
-      pageTexts.push(extractPageText(textContent.items));
+      const pageText = extractPageText(textContent.items);
+      const pageWords = normalizeText(pageText).match(/\S+/gu) ?? [];
+
+      pageWordStarts.push(extractedWordCount);
+      extractedWordCount += pageWords.length;
+      pageTexts.push(pageText);
       page.cleanup();
     }
 
@@ -134,6 +144,15 @@ async function handleFileSelection(event) {
 
     if (words.length === 0) {
       throw new Error("NO_EXTRACTABLE_TEXT");
+    }
+
+    let chapters = [];
+
+    try {
+      const outline = await pdfDocument.getOutline();
+      chapters = await buildChapterIndex(outline ?? [], pdfDocument, pageWordStarts);
+    } catch (outlineError) {
+      console.warn("No se pudo leer el índice del PDF:", outlineError);
     }
 
     const storageKey = createBookStorageKey(file);
@@ -146,12 +165,13 @@ async function handleFileSelection(event) {
         lastModified: file.lastModified,
         pageCount: pdfDocument.numPages,
         words,
+        chapters,
       });
     } catch (storageError) {
       console.warn("No se pudo guardar el libro localmente:", storageError);
     }
 
-    openBook(file, words, pdfDocument.numPages, storageKey);
+    openBook(file, words, pdfDocument.numPages, storageKey, chapters);
   } catch (error) {
     console.error("No se pudo abrir el PDF:", error);
 
@@ -255,10 +275,60 @@ function normalizeText(text) {
     .trim();
 }
 
-function openBook(book, words, pageCount, storageKey = createBookStorageKey(book)) {
+async function buildChapterIndex(outline, pdfDocument, pageWordStarts) {
+  return Promise.all(
+    outline.map(async (item) => {
+      const title = typeof item.title === "string"
+        ? item.title.replace(/\s+/gu, " ").trim()
+        : "";
+      const [wordIndex, children] = await Promise.all([
+        resolveChapterWordIndex(item.dest, pdfDocument, pageWordStarts),
+        buildChapterIndex(item.items ?? [], pdfDocument, pageWordStarts),
+      ]);
+
+      return {
+        title: title || "Sección sin título",
+        wordIndex,
+        children,
+      };
+    }),
+  );
+}
+
+async function resolveChapterWordIndex(destination, pdfDocument, pageWordStarts) {
+  if (!destination) {
+    return null;
+  }
+
+  try {
+    const resolvedDestination = typeof destination === "string"
+      ? await pdfDocument.getDestination(destination)
+      : destination;
+    const pageReference = resolvedDestination?.[0];
+
+    if (pageReference === undefined || pageReference === null) {
+      return null;
+    }
+
+    const pageIndex = Number.isInteger(pageReference)
+      ? pageReference
+      : await pdfDocument.getPageIndex(pageReference);
+
+    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pageWordStarts.length) {
+      return null;
+    }
+
+    return pageWordStarts[pageIndex];
+  } catch {
+    return null;
+  }
+}
+
+function openBook(book, words, pageCount, storageKey = createBookStorageKey(book), chapters = []) {
   state.words = words;
   state.pageCount = pageCount;
   state.storageKey = storageKey;
+  state.chapters = Array.isArray(chapters) ? chapters : [];
   state.currentIndex = loadBookProgress(state.storageKey, words.length);
 
   bookTitle.textContent = book.name.replace(/\.pdf$/iu, "");
@@ -266,6 +336,7 @@ function openBook(book, words, pageCount, storageKey = createBookStorageKey(book
   progressControl.max = String(words.length - 1);
 
   updateBookMetadata();
+  renderTableOfContents();
   renderReader();
   setUploadStatus("");
   uploadView.hidden = true;
@@ -399,6 +470,58 @@ function renderPreviousContext() {
   previousContext.hidden = contextWords.length === 0;
 }
 
+function renderTableOfContents() {
+  tableOfContents.open = false;
+  tableOfContentsList.replaceChildren();
+
+  if (state.chapters.length === 0) {
+    tableOfContents.hidden = true;
+    return;
+  }
+
+  tableOfContentsList.append(createChapterList(state.chapters));
+  tableOfContents.hidden = false;
+}
+
+function createChapterList(chapters) {
+  const list = document.createElement("ul");
+  list.className = "toc-list";
+
+  for (const chapter of chapters) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const hasDestination = Number.isInteger(chapter.wordIndex);
+
+    item.className = "toc-item";
+    button.className = "toc-button";
+    button.type = "button";
+    button.textContent = chapter.title;
+    button.disabled = !hasDestination;
+
+    if (hasDestination) {
+      button.addEventListener("click", () => jumpToChapter(chapter.wordIndex));
+    }
+
+    item.append(button);
+
+    if (Array.isArray(chapter.children) && chapter.children.length > 0) {
+      item.append(createChapterList(chapter.children));
+    }
+
+    list.append(item);
+  }
+
+  return list;
+}
+
+function jumpToChapter(wordIndex) {
+  pausePlayback();
+  state.currentIndex = clamp(wordIndex, 0, state.words.length - 1);
+  renderReader();
+  saveBookProgress();
+  tableOfContents.open = false;
+}
+
 function updatePlaybackButton() {
   if (state.isPlaying) {
     playButton.textContent = "Pausar";
@@ -493,7 +616,7 @@ async function restoreLastBook() {
       ? record.pageCount
       : 1;
 
-    openBook(record, record.words, pageCount, storageKey);
+    openBook(record, record.words, pageCount, storageKey, record.chapters ?? []);
   } catch (error) {
     console.warn("No se pudo restaurar el último libro:", error);
     clearLastBookId();
