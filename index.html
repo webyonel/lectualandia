@@ -37,7 +37,10 @@
             <h1 id="book-title" class="book-title">Libro</h1>
             <p id="book-meta" class="book-meta"></p>
           </div>
-          <button id="change-book" class="text-button" type="button">Cambiar PDF</button>
+          <div class="reader-header__actions">
+            <button id="open-word-list" class="text-button" type="button">Texto del libro</button>
+            <button id="change-book" class="text-button" type="button">Cambiar PDF</button>
+          </div>
         </header>
 
         <details id="table-of-contents" class="table-of-contents" hidden>
@@ -104,5 +107,22 @@
         </div>
       </section>
     </main>
+
+    <div id="word-list-backdrop" class="word-list-backdrop" hidden></div>
+    <aside id="word-list" class="word-list" hidden aria-hidden="true" aria-label="Lista de palabras del libro">
+      <header class="word-list__header">
+        <div class="word-list__titles">
+          <p class="eyebrow">Navegación</p>
+          <h2 class="word-list__title" id="word-list-title">Palabras</h2>
+        </div>
+        <button id="close-word-list" class="text-button" type="button">Cerrar</button>
+      </header>
+      <label class="word-list__search">
+        <span class="visually-hidden">Buscar palabra</span>
+        <input id="word-list-search" type="search" placeholder="Buscar palabra" autocomplete="off">
+      </label>
+      <p id="word-list-status" class="word-list__status" role="status" aria-live="polite"></p>
+      <div id="word-list-body" class="word-list__body" tabindex="-1"></div>
+    </aside>
   </body>
 </html>

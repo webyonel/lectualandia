@@ -37,6 +37,14 @@ const speedOutput = document.querySelector("#speed-output");
 const changeBookButton = document.querySelector("#change-book");
 const tableOfContents = document.querySelector("#table-of-contents");
 const tableOfContentsList = document.querySelector("#table-of-contents-list");
+const openWordListButton = document.querySelector("#open-word-list");
+const closeWordListButton = document.querySelector("#close-word-list");
+const wordListPanel = document.querySelector("#word-list");
+const wordListBackdrop = document.querySelector("#word-list-backdrop");
+const wordListBody = document.querySelector("#word-list-body");
+const wordListSearch = document.querySelector("#word-list-search");
+const wordListStatus = document.querySelector("#word-list-status");
+const wordListTitle = document.querySelector("#word-list-title");
 
 const state = {
   words: [],
@@ -47,6 +55,13 @@ const state = {
   storageKey: null,
   pageCount: 0,
   chapters: [],
+  wordListOpen: false,
+  paragraphs: [],
+  paragraphNodes: new Map(),
+  paragraphObserver: null,
+  hydrated: new Set(),
+  currentWordElement: null,
+  searchQuery: "",
 };
 
 speedControl.value = String(state.wordsPerMinute);
@@ -57,6 +72,12 @@ playButton.addEventListener("click", togglePlayback);
 backButton.addEventListener("click", () => seekBy(-10));
 forwardButton.addEventListener("click", () => seekBy(10));
 changeBookButton.addEventListener("click", () => fileInput.click());
+
+openWordListButton.addEventListener("click", openWordList);
+closeWordListButton.addEventListener("click", closeWordList);
+wordListBackdrop.addEventListener("click", closeWordList);
+wordListSearch.addEventListener("input", handleWordListSearch);
+wordListBody.addEventListener("click", handleWordListClick);
 
 progressControl.addEventListener("input", () => {
   pausePlayback();
@@ -122,25 +143,20 @@ async function handleFileSelection(event) {
     };
 
     pdfDocument = await loadingTask.promise;
-    const pageTexts = [];
+    const words = [];
+    const paragraphs = [];
     const pageWordStarts = [];
-    let extractedWordCount = 0;
 
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
       setUploadStatus(`Extrayendo texto de la página ${pageNumber} de ${pdfDocument.numPages}…`);
       const page = await pdfDocument.getPage(pageNumber);
       const textContent = await page.getTextContent();
-      const pageText = extractPageText(textContent.items);
-      const pageWords = normalizeText(pageText).match(/\S+/gu) ?? [];
+      const pageContent = splitIntoParagraphs(extractPageText(textContent.items));
 
-      pageWordStarts.push(extractedWordCount);
-      extractedWordCount += pageWords.length;
-      pageTexts.push(pageText);
+      pageWordStarts.push(words.length);
+      appendPageContent(words, paragraphs, pageContent);
       page.cleanup();
     }
-
-    const normalizedText = normalizeText(pageTexts.join("\n"));
-    const words = normalizedText.match(/\S+/gu) ?? [];
 
     if (words.length === 0) {
       throw new Error("NO_EXTRACTABLE_TEXT");
@@ -165,13 +181,14 @@ async function handleFileSelection(event) {
         lastModified: file.lastModified,
         pageCount: pdfDocument.numPages,
         words,
+        paragraphs,
         chapters,
       });
     } catch (storageError) {
       console.warn("No se pudo guardar el libro localmente:", storageError);
     }
 
-    openBook(file, words, pdfDocument.numPages, storageKey, chapters);
+    openBook(file, words, pdfDocument.numPages, storageKey, chapters, paragraphs);
   } catch (error) {
     console.error("No se pudo abrir el PDF:", error);
 
@@ -197,6 +214,8 @@ async function handleFileSelection(event) {
 function extractPageText(items) {
   let pageText = "";
   let previousItem = null;
+  let lineStartX = null;
+  let maxLineEndX = 0;
 
   for (const item of items) {
     if (typeof item.str !== "string") {
@@ -214,17 +233,51 @@ function extractPageText(items) {
 
     if (previousItem) {
       if (startsNewLine(previousItem, item)) {
-        pageText += "\n";
+        pageText += startsNewParagraph(previousItem, item, lineStartX, maxLineEndX)
+          ? "\n\n"
+          : "\n";
+        lineStartX = item.transform?.[4] ?? null;
       } else if (hasWordGap(previousItem, item)) {
         pageText += " ";
       }
+    } else {
+      lineStartX = item.transform?.[4] ?? null;
     }
 
     pageText += item.str;
     previousItem = item;
+    maxLineEndX = Math.max(maxLineEndX, lineEnd(item));
   }
 
   return pageText.trim();
+}
+
+function lineEnd(item) {
+  const x = item.transform?.[4];
+  return Number.isFinite(x) ? x + (item.width || 0) : 0;
+}
+
+// Un párrafo nuevo se reconoce por la sangría de su primera línea o porque la
+// línea anterior terminó muy lejos del margen derecho. Los umbrales se calibran
+// con la propia página (lineStartX / maxLineEndX), así que no dependen del
+// tamaño de fuente ni de los márgenes concretos del PDF.
+function startsNewParagraph(previousItem, currentItem, lineStartX, maxLineEndX) {
+  const currentX = currentItem.transform?.[4];
+  const textHeight = Math.max(previousItem.height || 0, currentItem.height || 0, 1);
+
+  if (Number.isFinite(currentX) && Number.isFinite(lineStartX)) {
+    if (currentX > lineStartX + textHeight * 0.6) {
+      return true;
+    }
+  }
+
+  const previousEnd = lineEnd(previousItem);
+
+  if (maxLineEndX > 0 && previousEnd > 0) {
+    return previousEnd < maxLineEndX - textHeight * 2;
+  }
+
+  return false;
 }
 
 function startsNewLine(previousItem, currentItem) {
@@ -268,14 +321,60 @@ function hasWordGap(previousItem, currentItem) {
   return gap > textHeight * 0.15;
 }
 
-function normalizeText(text) {
-  return text
-    .replace(/([\p{L}\p{N}])-\s*\n\s*([\p{L}\p{N}])/gu, "$1$2")
-    .replace(/\s+/gu, " ")
-    .trim();
+// Une las palabras cortadas a final de línea ("pala-\nbra". Se limita a espacios
+// y tabuladores alrededor del salto: con \s* se tragaría el segundo salto de un
+// cambio de párrafo y pegaría el final de un párrafo con el principio del otro.
+function dehyphenate(text) {
+  return text.replace(/([\p{L}\p{N}])-[ \t]*\n[ \t]*([\p{L}\p{N}])/gu, "$1$2");
 }
 
-async function buildChapterIndex(outline, pdfDocument, pageWordStarts) {
+// Convierte el texto extraído en el array plano de palabras que usa toda la app
+// (direccionado por índice global) más los límites de cada párrafo.
+function splitIntoParagraphs(text) {
+  const words = [];
+  const paragraphs = [];
+
+  for (const block of dehyphenate(text).split(/\n\s*\n\s*/u)) {
+    const blockWords = block.replace(/\s+/gu, " ").trim().match(/\S+/gu) ?? [];
+
+    if (blockWords.length === 0) {
+      continue;
+    }
+
+    paragraphs.push({ start: words.length, length: blockWords.length });
+    words.push(...blockWords);
+  }
+
+  return { words, paragraphs };
+}
+
+// Acumula el contenido de una página sobre el del libro. Si la página anterior
+// quedó a media frase, su último párrafo continúa en el primero de esta página:
+// se fusionan para que un párrafo partido por el salto de página se lea entero.
+function appendPageContent(words, paragraphs, pageContent) {
+  const offset = words.length;
+  const lastWord = words.at(-1);
+  const continuesParagraph =
+    paragraphs.length > 0 &&
+    pageContent.paragraphs.length > 0 &&
+    typeof lastWord === "string" &&
+    !/[.!?…:][”’"'»\)\]]*$/u.test(lastWord);
+
+  pageContent.paragraphs.forEach((paragraph, index) => {
+    if (index === 0 && continuesParagraph) {
+      paragraphs.at(-1).length += paragraph.length;
+      return;
+    }
+
+    paragraphs.push({ start: offset + paragraph.start, length: paragraph.length });
+  });
+
+  for (const word of pageContent.words) {
+    words.push(word);
+  }
+}
+
+function buildChapterIndex(outline, pdfDocument, pageWordStarts) {
   return Promise.all(
     outline.map(async (item) => {
       const title = typeof item.title === "string"
@@ -324,11 +423,19 @@ async function resolveChapterWordIndex(destination, pdfDocument, pageWordStarts)
   }
 }
 
-function openBook(book, words, pageCount, storageKey = createBookStorageKey(book), chapters = []) {
+function openBook(
+  book,
+  words,
+  pageCount,
+  storageKey = createBookStorageKey(book),
+  chapters = [],
+  paragraphs = null,
+) {
   state.words = words;
   state.pageCount = pageCount;
   state.storageKey = storageKey;
   state.chapters = Array.isArray(chapters) ? chapters : [];
+  state.paragraphs = normalizeParagraphs(paragraphs, words.length);
   state.currentIndex = loadBookProgress(state.storageKey, words.length);
 
   bookTitle.textContent = book.name.replace(/\.pdf$/iu, "");
@@ -342,6 +449,37 @@ function openBook(book, words, pageCount, storageKey = createBookStorageKey(book
   uploadView.hidden = true;
   readerView.hidden = false;
   playButton.focus();
+}
+
+const FALLBACK_PARAGRAPH_WORDS = 120;
+
+// Los libros guardados antes de que se extrajeran los párrafos solo tienen el
+// array plano de palabras. Para esos se trocea en bloques de tamaño fijo: no
+// coincide con los párrafos del PDF, pero se lee de corrido y la carga
+// progresiva sigue funcionando. Al volver a abrir el PDF se regenera bien.
+function normalizeParagraphs(paragraphs, wordCount) {
+  if (wordCount === 0) {
+    return [];
+  }
+
+  const last = Array.isArray(paragraphs) ? paragraphs.at(-1) : null;
+  const isUsable =
+    last && last.start + last.length === wordCount && paragraphs[0].start === 0;
+
+  if (isUsable) {
+    return paragraphs;
+  }
+
+  const fallback = [];
+
+  for (let start = 0; start < wordCount; start += FALLBACK_PARAGRAPH_WORDS) {
+    fallback.push({
+      start,
+      length: Math.min(FALLBACK_PARAGRAPH_WORDS, wordCount - start),
+    });
+  }
+
+  return fallback;
 }
 
 function togglePlayback() {
@@ -454,6 +592,9 @@ function renderReader() {
 
   wordDisplay.textContent = state.words[state.currentIndex];
   renderPreviousContext();
+  if (state.wordListOpen) {
+    updateWordListCurrent();
+  }
   positionLabel.textContent = `Palabra ${numberFormatter.format(state.currentIndex + 1)} de ${numberFormatter.format(totalWords)}`;
   progressPercent.textContent = `${Math.round(progress)} %`;
   progressControl.value = String(state.currentIndex);
@@ -481,6 +622,318 @@ function renderTableOfContents() {
 
   tableOfContentsList.append(createChapterList(state.chapters));
   tableOfContents.hidden = false;
+}
+
+function openWordList() {
+  if (state.words.length === 0) {
+    return;
+  }
+
+  state.wordListOpen = true;
+  wordListPanel.hidden = false;
+  wordListBackdrop.hidden = false;
+  wordListPanel.setAttribute("aria-hidden", "false");
+  wordListPanel.setAttribute("aria-modal", "true");
+  document.body.classList.add("no-scroll");
+  wordListTitle.textContent = bookTitle.textContent || "Palabras";
+  wordListSearch.value = "";
+  state.searchQuery = "";
+  renderWordList();
+  scrollWordListTo(state.currentIndex);
+  // El foco va al texto, no al buscador: se abre para leer, y en el móvil
+  // enfocar el buscador levantaría el teclado tapando media pantalla.
+  wordListBody.focus();
+}
+
+function closeWordList() {
+  if (!state.wordListOpen) {
+    return;
+  }
+
+  state.wordListOpen = false;
+  wordListPanel.hidden = true;
+  wordListBackdrop.hidden = true;
+  wordListPanel.setAttribute("aria-hidden", "true");
+  wordListPanel.removeAttribute("aria-modal");
+  document.body.classList.remove("no-scroll");
+  wordListSearch.value = "";
+  state.searchQuery = "";
+  state.paragraphObserver?.disconnect();
+  state.paragraphObserver = null;
+  renderWordList();
+  playButton.focus();
+}
+
+// El panel se monta entero, pero cada párrafo empieza como un simple nodo de
+// texto: barato de crear y ya ocupa su altura real, así que el scroll es
+// correcto desde el primer momento. Solo los párrafos cercanos a la vista se
+// "hidratan" a palabras clicables (ver setupParagraphObserver).
+function renderWordList() {
+  if (!state.wordListOpen) {
+    wordListBody.replaceChildren();
+    state.paragraphNodes.clear();
+    state.hydrated.clear();
+    state.currentWordElement = null;
+    wordListStatus.textContent = "";
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  state.paragraphNodes.clear();
+  state.hydrated.clear();
+  state.currentWordElement = null;
+
+  for (const paragraph of state.paragraphs) {
+    const paragraphElement = document.createElement("p");
+
+    paragraphElement.className = "word-text__paragraph";
+    paragraphElement.dataset.paragraphStart = String(paragraph.start);
+    paragraphElement.textContent = flattenParagraph(paragraph);
+
+    state.paragraphNodes.set(paragraph.start, paragraphElement);
+    fragment.append(paragraphElement);
+  }
+
+  wordListBody.replaceChildren(fragment);
+  setupParagraphObserver();
+  updateWordListStatus();
+  updateWordListCurrent();
+}
+
+function flattenParagraph(paragraph) {
+  return state.words
+    .slice(paragraph.start, paragraph.start + paragraph.length)
+    .join(" ");
+}
+
+function updateWordListStatus() {
+  const query = state.searchQuery;
+
+  if (!query) {
+    wordListStatus.textContent = `${numberFormatter.format(state.words.length)} palabras`;
+    return;
+  }
+
+  // Una sola pasada sobre el texto completo en vez de recorrer las 70.000
+  // palabras una a una, para que teclear en el buscador no bloquee la interfaz.
+  const matches = state.words.join(" ").match(new RegExp(escapeRegExp(query), "giu"));
+  const total = matches ? matches.length : 0;
+
+  wordListStatus.textContent = total === 1
+    ? "1 coincidencia"
+    : `${numberFormatter.format(total)} coincidencias`;
+}
+
+function setupParagraphObserver() {
+  state.paragraphObserver?.disconnect();
+
+  state.paragraphObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const start = Number(entry.target.dataset.paragraphStart);
+
+        if (entry.isIntersecting) {
+          hydrateParagraph(start);
+        } else {
+          dehydrateParagraph(start);
+        }
+      }
+    },
+    { root: wordListBody, rootMargin: "1500px 0px" },
+  );
+
+  for (const paragraphElement of state.paragraphNodes.values()) {
+    state.paragraphObserver.observe(paragraphElement);
+  }
+}
+
+function hydrateParagraph(start) {
+  const paragraphElement = state.paragraphNodes.get(start);
+  const paragraph = state.paragraphs[findParagraphIndex(start)];
+
+  if (!paragraphElement || !paragraph) {
+    return null;
+  }
+
+  if (state.hydrated.has(start) && paragraphElement.dataset.query === state.searchQuery) {
+    return paragraphElement;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  for (let offset = 0; offset < paragraph.length; offset += 1) {
+    const globalIndex = paragraph.start + offset;
+    const wrapper = document.createElement("span");
+
+    wrapper.className = "word-text__word";
+    wrapper.dataset.wordIndex = String(globalIndex);
+    wrapper.setAttribute("role", "button");
+    wrapper.tabIndex = 0;
+    appendWordContent(wrapper, state.words[globalIndex]);
+
+    if (globalIndex === state.currentIndex) {
+      wrapper.classList.add("word-text__word--current");
+      wrapper.setAttribute("aria-current", "true");
+      state.currentWordElement = wrapper;
+    }
+
+    fragment.append(wrapper);
+    fragment.append(document.createTextNode(" "));
+  }
+
+  paragraphElement.replaceChildren(fragment);
+  paragraphElement.dataset.query = state.searchQuery;
+  state.hydrated.add(start);
+
+  return paragraphElement;
+}
+
+function dehydrateParagraph(start) {
+  const paragraph = state.paragraphs[findParagraphIndex(start)];
+
+  if (!state.hydrated.has(start) || !paragraph) {
+    return;
+  }
+
+  // El párrafo que se está leyendo se queda hidratado para no perder el
+  // resaltado de la palabra actual mientras avanza la lectura.
+  if (
+    state.currentIndex >= paragraph.start &&
+    state.currentIndex < paragraph.start + paragraph.length
+  ) {
+    return;
+  }
+
+  const paragraphElement = state.paragraphNodes.get(start);
+
+  if (!paragraphElement) {
+    return;
+  }
+
+  if (state.currentWordElement?.closest("p") === paragraphElement) {
+    state.currentWordElement = null;
+  }
+
+  paragraphElement.textContent = flattenParagraph(paragraph);
+  delete paragraphElement.dataset.query;
+  state.hydrated.delete(start);
+}
+
+// Reparte la palabra en trozos resaltados y sin resaltar recorriendo una sola
+// vez el texto original: mezclar el texto en minúsculas con el original era lo
+// que descuadraba el resaltado.
+function appendWordContent(wrapper, word) {
+  const query = state.searchQuery;
+
+  if (!query) {
+    wrapper.textContent = word;
+    return;
+  }
+
+  const pattern = new RegExp(escapeRegExp(query), "giu");
+  let lastIndex = 0;
+
+  for (const match of word.matchAll(pattern)) {
+    if (match.index > lastIndex) {
+      wrapper.append(word.slice(lastIndex, match.index));
+    }
+
+    const mark = document.createElement("mark");
+
+    mark.className = "word-text__mark";
+    mark.textContent = match[0];
+    wrapper.append(mark);
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex === 0) {
+    wrapper.textContent = word;
+    return;
+  }
+
+  if (lastIndex < word.length) {
+    wrapper.append(word.slice(lastIndex));
+  }
+}
+
+function handleWordListSearch() {
+  const query = wordListSearch.value.trim();
+
+  if (query === state.searchQuery) {
+    return;
+  }
+
+  state.searchQuery = query;
+  updateWordListStatus();
+
+  // Solo hay que repintar lo que se está viendo; el resto se repinta al
+  // hidratarse, porque hydrateParagraph compara contra data-query.
+  for (const start of [...state.hydrated]) {
+    hydrateParagraph(start);
+  }
+}
+
+// Búsqueda binaria del párrafo que contiene una palabra concreta.
+function findParagraphIndex(wordIndex) {
+  let low = 0;
+  let high = state.paragraphs.length - 1;
+
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const paragraph = state.paragraphs[middle];
+
+    if (wordIndex < paragraph.start) {
+      high = middle - 1;
+    } else if (wordIndex >= paragraph.start + paragraph.length) {
+      low = middle + 1;
+    } else {
+      return middle;
+    }
+  }
+
+  return -1;
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function handleWordListClick(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+  const word = target.closest("[data-word-index]");
+  if (!word) {
+    return;
+  }
+  const wordIndex = Number(word.dataset.wordIndex);
+  if (!Number.isInteger(wordIndex)) {
+    return;
+  }
+  jumpToChapter(wordIndex);
+  closeWordList();
+}
+
+function scrollWordListTo(wordIndex) {
+  if (!state.wordListOpen) {
+    return;
+  }
+
+  const paragraphIndex = findParagraphIndex(wordIndex);
+
+  if (paragraphIndex === -1) {
+    return;
+  }
+
+  const paragraph = state.paragraphs[paragraphIndex];
+  const paragraphElement = hydrateParagraph(paragraph.start);
+  const element =
+    paragraphElement?.querySelector(`[data-word-index="${wordIndex}"]`) ??
+    state.paragraphNodes.get(paragraph.start);
+
+  element?.scrollIntoView({ block: "center", behavior: "auto" });
 }
 
 function createChapterList(chapters) {
@@ -556,6 +1009,35 @@ function updateBookMetadata() {
   bookMeta.textContent = `${numberFormatter.format(state.pageCount)} ${pageLabel} · ${numberFormatter.format(state.words.length)} palabras · ${estimatedMinutes} min aprox.`;
 }
 
+function updateWordListCurrent() {
+  if (!state.wordListOpen) {
+    return;
+  }
+
+  if (state.currentWordElement) {
+    state.currentWordElement.classList.remove("word-text__word--current");
+    state.currentWordElement.removeAttribute("aria-current");
+    state.currentWordElement = null;
+  }
+
+  const paragraphIndex = findParagraphIndex(state.currentIndex);
+
+  if (paragraphIndex === -1) {
+    return;
+  }
+
+  const paragraphElement = hydrateParagraph(state.paragraphs[paragraphIndex].start);
+  const current = paragraphElement?.querySelector(
+    `[data-word-index="${state.currentIndex}"]`,
+  );
+
+  if (current) {
+    current.classList.add("word-text__word--current");
+    current.setAttribute("aria-current", "true");
+    state.currentWordElement = current;
+  }
+}
+
 function handleKeyboardShortcut(event) {
   if (readerView.hidden) {
     return;
@@ -571,6 +1053,9 @@ function handleKeyboardShortcut(event) {
   if (event.code === "Space" && !(target instanceof HTMLButtonElement)) {
     event.preventDefault();
     togglePlayback();
+  } else if (event.code === "Escape" && state.wordListOpen) {
+    event.preventDefault();
+    closeWordList();
   } else if (event.code === "ArrowLeft") {
     event.preventDefault();
     seekBy(-10);
@@ -616,7 +1101,14 @@ async function restoreLastBook() {
       ? record.pageCount
       : 1;
 
-    openBook(record, record.words, pageCount, storageKey, record.chapters ?? []);
+    openBook(
+      record,
+      record.words,
+      pageCount,
+      storageKey,
+      record.chapters ?? [],
+      record.paragraphs ?? null,
+    );
   } catch (error) {
     console.warn("No se pudo restaurar el último libro:", error);
     clearLastBookId();
