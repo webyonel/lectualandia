@@ -38,6 +38,7 @@
             <p id="book-meta" class="book-meta"></p>
           </div>
           <div class="reader-header__actions">
+            <button id="open-bookmarks" class="text-button" type="button">Marcadores</button>
             <button id="open-word-list" class="text-button" type="button">Texto del libro</button>
             <button id="change-book" class="text-button" type="button">Cambiar PDF</button>
           </div>
@@ -124,5 +125,42 @@
       <p id="word-list-status" class="word-list__status" role="status" aria-live="polite"></p>
       <div id="word-list-body" class="word-list__body" tabindex="-1"></div>
     </aside>
+
+    <div id="bookmarks-backdrop" class="word-list-backdrop" hidden></div>
+    <aside id="bookmarks-panel" class="word-list" hidden aria-hidden="true" aria-label="Marcadores del libro">
+      <header class="word-list__header">
+        <div class="word-list__titles">
+          <p class="eyebrow">Tus marcadores</p>
+          <h2 class="word-list__title">Marcadores</h2>
+        </div>
+        <div class="bookmarks-panel__actions">
+          <button id="edit-categories" class="text-button" type="button">Editar categorías</button>
+          <button id="close-bookmarks" class="text-button" type="button">Cerrar</button>
+        </div>
+      </header>
+      <p id="bookmarks-empty" class="bookmarks-empty" hidden>
+        Selecciona texto en el libro para crear un marcador.
+      </p>
+      <div id="bookmarks-body" class="word-list__body" tabindex="-1"></div>
+    </aside>
+
+    <button id="bookmark-fab" class="bookmark-fab" type="button" hidden>+ Marcador</button>
+
+    <div id="color-picker" class="color-picker" hidden role="dialog" aria-label="Elige un color">
+      <div class="color-picker__swatches"></div>
+      <button id="color-picker-cancel" class="color-picker__cancel" type="button">Cancelar</button>
+    </div>
+
+    <div id="category-editor" class="category-editor" hidden role="dialog" aria-label="Editar categorías" aria-modal="true">
+      <div class="category-editor__panel">
+        <h3 class="category-editor__title">Editar categorías</h3>
+        <p class="category-editor__hint">Cambia el nombre de cada color. Pulsa Guardar para conservar los cambios.</p>
+        <form id="category-editor-form" class="category-editor__form"></form>
+        <div class="category-editor__actions">
+          <button id="category-editor-cancel" class="text-button" type="button">Cancelar</button>
+          <button id="category-editor-save" class="play-button" type="submit" form="category-editor-form">Guardar</button>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

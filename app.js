@@ -13,6 +13,15 @@ const DATABASE_NAME = "lector-focal";
 const DATABASE_VERSION = 1;
 const BOOK_STORE_NAME = "books";
 const LAST_BOOK_KEY = "lector-focal:ultimo-libro";
+const CATEGORIES_KEY = "lector-focal:categorias";
+const DEFAULT_CATEGORIES = [
+  { id: "blue", label: "Para recordar" },
+  { id: "green", label: "Ideas clave" },
+  { id: "yellow", label: "Importante" },
+  { id: "pink", label: "Frases favoritas" },
+  { id: "red", label: "No estoy de acuerdo" },
+];
+const DEFAULT_BOOKMARK_COLOR = "blue";
 const numberFormatter = new Intl.NumberFormat("es-ES");
 
 let databasePromise;
@@ -45,6 +54,20 @@ const wordListBody = document.querySelector("#word-list-body");
 const wordListSearch = document.querySelector("#word-list-search");
 const wordListStatus = document.querySelector("#word-list-status");
 const wordListTitle = document.querySelector("#word-list-title");
+const openBookmarksButton = document.querySelector("#open-bookmarks");
+const closeBookmarksButton = document.querySelector("#close-bookmarks");
+const bookmarksBackdrop = document.querySelector("#bookmarks-backdrop");
+const bookmarksPanel = document.querySelector("#bookmarks-panel");
+const bookmarksBody = document.querySelector("#bookmarks-body");
+const bookmarksEmpty = document.querySelector("#bookmarks-empty");
+const editCategoriesButton = document.querySelector("#edit-categories");
+const bookmarkFab = document.querySelector("#bookmark-fab");
+const colorPicker = document.querySelector("#color-picker");
+const colorPickerSwatches = document.querySelector(".color-picker__swatches");
+const colorPickerCancel = document.querySelector("#color-picker-cancel");
+const categoryEditor = document.querySelector("#category-editor");
+const categoryEditorForm = document.querySelector("#category-editor-form");
+const categoryEditorCancel = document.querySelector("#category-editor-cancel");
 
 const state = {
   words: [],
@@ -62,6 +85,11 @@ const state = {
   hydrated: new Set(),
   currentWordElement: null,
   searchQuery: "",
+  bookmarks: [],
+  bookmarkPanelOpen: false,
+  selectionRange: null,
+  categories: loadCategories(),
+  colorPickerCallback: null,
 };
 
 speedControl.value = String(state.wordsPerMinute);
@@ -78,6 +106,22 @@ closeWordListButton.addEventListener("click", closeWordList);
 wordListBackdrop.addEventListener("click", closeWordList);
 wordListSearch.addEventListener("input", handleWordListSearch);
 wordListBody.addEventListener("click", handleWordListClick);
+
+openBookmarksButton.addEventListener("click", openBookmarksPanel);
+closeBookmarksButton.addEventListener("click", closeBookmarksPanel);
+bookmarksBackdrop.addEventListener("click", closeBookmarksPanel);
+bookmarksBody.addEventListener("click", handleBookmarksBodyClick);
+editCategoriesButton.addEventListener("click", openCategoryEditor);
+bookmarkFab.addEventListener("mousedown", (event) => {
+  // Evita que el clic sobre el FAB colapse la selección de texto del usuario.
+  event.preventDefault();
+});
+bookmarkFab.addEventListener("click", handleBookmarkFabClick);
+colorPickerCancel.addEventListener("click", hideColorPicker);
+colorPickerSwatches.addEventListener("click", handleColorPickerClick);
+categoryEditorCancel.addEventListener("click", closeCategoryEditor);
+categoryEditorForm.addEventListener("submit", handleCategoryEditorSubmit);
+document.addEventListener("selectionchange", handleSelectionChange);
 
 progressControl.addEventListener("input", () => {
   pausePlayback();
@@ -436,6 +480,7 @@ function openBook(
   state.storageKey = storageKey;
   state.chapters = Array.isArray(chapters) ? chapters : [];
   state.paragraphs = normalizeParagraphs(paragraphs, words.length);
+  state.bookmarks = normalizeBookmarks(book?.bookmarks);
   state.currentIndex = loadBookProgress(state.storageKey, words.length);
 
   bookTitle.textContent = book.name.replace(/\.pdf$/iu, "");
@@ -756,7 +801,10 @@ function hydrateParagraph(start) {
     return null;
   }
 
-  if (state.hydrated.has(start) && paragraphElement.dataset.query === state.searchQuery) {
+  const queryChanged = paragraphElement.dataset.query !== state.searchQuery;
+  const bookmarksChanged = paragraphElement.dataset.bookmarksHash !== bookmarkHash();
+
+  if (state.hydrated.has(start) && !queryChanged && !bookmarksChanged) {
     return paragraphElement;
   }
 
@@ -784,6 +832,8 @@ function hydrateParagraph(start) {
 
   paragraphElement.replaceChildren(fragment);
   paragraphElement.dataset.query = state.searchQuery;
+  applyBookmarkHighlights(paragraphElement, paragraph);
+  paragraphElement.dataset.bookmarksHash = bookmarkHash();
   state.hydrated.add(start);
 
   return paragraphElement;
@@ -1045,23 +1095,38 @@ function handleKeyboardShortcut(event) {
 
   const target = event.target;
   const isRangeInput = target instanceof HTMLInputElement && target.type === "range";
+  const isTextInput = target instanceof HTMLInputElement && (target.type === "text" || target.type === "search");
 
-  if (isRangeInput) {
+  if (isRangeInput || isTextInput) {
     return;
   }
 
   if (event.code === "Space" && !(target instanceof HTMLButtonElement)) {
     event.preventDefault();
     togglePlayback();
-  } else if (event.code === "Escape" && state.wordListOpen) {
-    event.preventDefault();
-    closeWordList();
+  } else if (event.code === "Escape") {
+    if (state.bookmarkPanelOpen) {
+      event.preventDefault();
+      closeBookmarksPanel();
+    } else if (state.wordListOpen) {
+      event.preventDefault();
+      closeWordList();
+    } else if (!colorPicker.hidden) {
+      event.preventDefault();
+      hideColorPicker();
+    } else if (!categoryEditor.hidden) {
+      event.preventDefault();
+      closeCategoryEditor();
+    }
   } else if (event.code === "ArrowLeft") {
     event.preventDefault();
     seekBy(-10);
   } else if (event.code === "ArrowRight") {
     event.preventDefault();
     seekBy(10);
+  } else if (event.code === "KeyB" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    addQuickBookmark();
   }
 }
 
@@ -1257,4 +1322,690 @@ function saveBookProgress() {
 
 function clamp(value, minimum, maximum) {
   return Math.min(Math.max(value, minimum), maximum);
+}
+
+// ---------- Marcadores ----------
+
+function loadCategories() {
+  try {
+    const raw = window.localStorage.getItem(CATEGORIES_KEY);
+    if (!raw) return DEFAULT_CATEGORIES.map((c) => ({ ...c }));
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return DEFAULT_CATEGORIES.map((c) => ({ ...c }));
+    }
+
+    return DEFAULT_CATEGORIES.map((def) => {
+      const found = parsed.find((c) => c && c.id === def.id);
+      return {
+        id: def.id,
+        label: found && typeof found.label === "string" && found.label.trim()
+          ? found.label.trim()
+          : def.label,
+      };
+    });
+  } catch (error) {
+    console.warn("No se pudieron cargar las categorías:", error);
+    return DEFAULT_CATEGORIES.map((c) => ({ ...c }));
+  }
+}
+
+function persistCategories() {
+  try {
+    window.localStorage.setItem(CATEGORIES_KEY, JSON.stringify(state.categories));
+  } catch (error) {
+    console.warn("No se pudieron guardar las categorías:", error);
+  }
+}
+
+function normalizeBookmarks(raw) {
+  if (!Array.isArray(raw) || state.words.length === 0) {
+    return [];
+  }
+
+  const validIds = new Set(state.categories.map((c) => c.id));
+  const max = state.words.length - 1;
+
+  return raw
+    .filter((b) => b && Number.isInteger(b.startIndex) && Number.isInteger(b.endIndex))
+    .map((b) => {
+      const start = clamp(Math.min(b.startIndex, b.endIndex), 0, max);
+      const end = clamp(Math.max(b.startIndex, b.endIndex), 0, max);
+      return {
+        id: typeof b.id === "string" && b.id ? b.id : crypto.randomUUID(),
+        startIndex: start,
+        endIndex: end,
+        color: validIds.has(b.color) ? b.color : DEFAULT_BOOKMARK_COLOR,
+        createdAt: typeof b.createdAt === "number" ? b.createdAt : Date.now(),
+      };
+    })
+    .sort((a, b) => a.startIndex - b.startIndex);
+}
+
+async function persistBookmarks() {
+  if (!state.storageKey) return;
+
+  try {
+    const database = await openBookDatabase();
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction(BOOK_STORE_NAME, "readwrite");
+      const store = transaction.objectStore(BOOK_STORE_NAME);
+      const request = store.get(state.storageKey);
+
+      request.onsuccess = () => {
+        const record = request.result;
+        if (!record) {
+          resolve();
+          return;
+        }
+        record.bookmarks = state.bookmarks;
+        const updateRequest = store.put(record);
+        updateRequest.onsuccess = () => resolve();
+        updateRequest.onerror = () => reject(updateRequest.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+  } catch (error) {
+    console.warn("No se pudieron guardar los marcadores:", error);
+  }
+}
+
+function bookmarkHash() {
+  if (state.bookmarks.length === 0) return "";
+  return state.bookmarks
+    .map((b) => `${b.id}:${b.color}:${b.startIndex}-${b.endIndex}`)
+    .join("|");
+}
+
+function invalidateBookmarkCaches() {
+  for (const paragraphElement of state.paragraphNodes.values()) {
+    delete paragraphElement.dataset.bookmarksHash;
+  }
+}
+
+function rehydrateVisibleParagraphs() {
+  // Forzar rehidratación para que los cambios en marcadores se reflejen en pantalla.
+  if (!state.wordListOpen) return;
+  renderWordList();
+}
+
+function addBookmark(startIndex, endIndex, color) {
+  if (state.words.length === 0) return null;
+
+  const validColor = state.categories.some((c) => c.id === color)
+    ? color
+    : DEFAULT_BOOKMARK_COLOR;
+  const max = state.words.length - 1;
+
+  const bookmark = {
+    id: crypto.randomUUID(),
+    startIndex: clamp(Math.min(startIndex, endIndex), 0, max),
+    endIndex: clamp(Math.max(startIndex, endIndex), 0, max),
+    color: validColor,
+    createdAt: Date.now(),
+  };
+
+  state.bookmarks.push(bookmark);
+  state.bookmarks.sort((a, b) => a.startIndex - b.startIndex);
+  invalidateBookmarkCaches();
+  void persistBookmarks();
+
+  if (state.bookmarkPanelOpen) {
+    renderBookmarksPanel();
+  }
+  rehydrateVisibleParagraphs();
+
+  return bookmark;
+}
+
+function removeBookmark(id) {
+  const before = state.bookmarks.length;
+  state.bookmarks = state.bookmarks.filter((b) => b.id !== id);
+  if (state.bookmarks.length === before) return;
+
+  invalidateBookmarkCaches();
+  void persistBookmarks();
+
+  if (state.bookmarkPanelOpen) {
+    renderBookmarksPanel();
+  }
+  rehydrateVisibleParagraphs();
+}
+
+function changeBookmarkColor(id, color) {
+  const bookmark = state.bookmarks.find((b) => b.id === id);
+  if (!bookmark) return;
+  if (!state.categories.some((c) => c.id === color)) return;
+  if (bookmark.color === color) return;
+
+  bookmark.color = color;
+  invalidateBookmarkCaches();
+  void persistBookmarks();
+
+  if (state.bookmarkPanelOpen) {
+    renderBookmarksPanel();
+  }
+  rehydrateVisibleParagraphs();
+}
+
+function addQuickBookmark() {
+  if (state.words.length === 0) return;
+  pausePlayback();
+  addBookmark(state.currentIndex, state.currentIndex, DEFAULT_BOOKMARK_COLOR);
+}
+
+// ---------- Selección nativa y botón flotante ----------
+
+let selectionChangePending = false;
+
+function handleSelectionChange() {
+  if (selectionChangePending) return;
+  selectionChangePending = true;
+  window.requestAnimationFrame(() => {
+    selectionChangePending = false;
+    updateFloatingActionButton();
+  });
+}
+
+function getWordIndexFromNode(node) {
+  if (!node) return null;
+  let element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  while (element && element !== wordListBody) {
+    if (element instanceof HTMLElement && element.dataset.wordIndex !== undefined) {
+      const idx = Number(element.dataset.wordIndex);
+      if (Number.isInteger(idx)) return idx;
+    }
+    element = element?.parentElement ?? null;
+  }
+  return null;
+}
+
+function findBookmarkRange(selection) {
+  const anchorIndex = getWordIndexFromNode(selection.anchorNode);
+  const focusIndex = getWordIndexFromNode(selection.focusNode);
+  if (anchorIndex === null && focusIndex === null) return null;
+  const a = anchorIndex ?? focusIndex;
+  const b = focusIndex ?? anchorIndex;
+  return { startIndex: Math.min(a, b), endIndex: Math.max(a, b) };
+}
+
+function updateFloatingActionButton() {
+  if (!state.wordListOpen) {
+    hideFloatingActionButton();
+    return;
+  }
+
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    hideFloatingActionButton();
+    return;
+  }
+
+  const range = selection.getRangeAt(0);
+  if (
+    !wordListBody.contains(range.commonAncestorContainer) &&
+    !wordListBody.contains(range.startContainer) &&
+    !wordListBody.contains(range.endContainer)
+  ) {
+    hideFloatingActionButton();
+    return;
+  }
+
+  const bookmarkRange = findBookmarkRange(selection);
+  if (!bookmarkRange) {
+    hideFloatingActionButton();
+    return;
+  }
+
+  const rect = range.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) {
+    hideFloatingActionButton();
+    return;
+  }
+
+  state.selectionRange = bookmarkRange;
+  showFloatingActionButton(rect);
+}
+
+function showFloatingActionButton(rect) {
+  bookmarkFab.hidden = false;
+  bookmarkFab.style.visibility = "hidden";
+  // Medir una vez pintado para evitar solapar el cálculo
+  window.requestAnimationFrame(() => {
+    const fabRect = bookmarkFab.getBoundingClientRect();
+    let top = rect.top - fabRect.height - 14;
+    let placeAbove = true;
+    if (top < 8) {
+      top = rect.bottom + 14;
+      placeAbove = false;
+    }
+    const left = clamp(
+      rect.left + rect.width / 2,
+      fabRect.width / 2 + 12,
+      window.innerWidth - fabRect.width / 2 - 12,
+    );
+    bookmarkFab.style.top = `${top}px`;
+    bookmarkFab.style.left = `${left}px`;
+    bookmarkFab.dataset.place = placeAbove ? "above" : "below";
+    bookmarkFab.style.visibility = "visible";
+  });
+}
+
+function hideFloatingActionButton() {
+  bookmarkFab.hidden = true;
+  state.selectionRange = null;
+}
+
+function handleBookmarkFabClick() {
+  if (!state.selectionRange) return;
+  const capturedRange = state.selectionRange;
+  showColorPicker({
+    anchorEl: bookmarkFab,
+    currentColor: DEFAULT_BOOKMARK_COLOR,
+    onSelect: (color) => {
+      addBookmark(capturedRange.startIndex, capturedRange.endIndex, color);
+      window.getSelection()?.removeAllRanges();
+      hideFloatingActionButton();
+    },
+    onCancel: () => {
+      hideFloatingActionButton();
+    },
+  });
+}
+
+// ---------- Color picker ----------
+
+function showColorPicker({ anchorEl, onSelect, currentColor, onCancel }) {
+  state.colorPickerCallback = { onSelect, onCancel };
+  colorPickerSwatches.replaceChildren();
+  for (const category of state.categories) {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = `color-picker__swatch color-picker__swatch--${category.id}`;
+    swatch.dataset.color = category.id;
+    swatch.dataset.label = category.label;
+    swatch.setAttribute("aria-label", category.label);
+    swatch.title = category.label;
+    if (category.id === currentColor) {
+      swatch.classList.add("color-picker__swatch--selected");
+    }
+    colorPickerSwatches.append(swatch);
+  }
+
+  colorPicker.hidden = false;
+  colorPicker.style.visibility = "hidden";
+  window.requestAnimationFrame(() => {
+    positionColorPicker(anchorEl);
+    colorPicker.style.visibility = "visible";
+  });
+}
+
+function hideColorPicker() {
+  colorPicker.hidden = true;
+  const callback = state.colorPickerCallback;
+  state.colorPickerCallback = null;
+  if (callback && callback.onCancel) callback.onCancel();
+}
+
+function positionColorPicker(anchorEl) {
+  const rect = anchorEl.getBoundingClientRect();
+  const pickerRect = colorPicker.getBoundingClientRect();
+  const margin = 8;
+
+  let top = rect.bottom + margin;
+  if (top + pickerRect.height > window.innerHeight - margin) {
+    top = rect.top - pickerRect.height - margin;
+  }
+  top = Math.max(margin, top);
+
+  let left = rect.left + rect.width / 2;
+  left = clamp(left, pickerRect.width / 2 + margin, window.innerWidth - pickerRect.width / 2 - margin);
+
+  colorPicker.style.top = `${top}px`;
+  colorPicker.style.left = `${left}px`;
+}
+
+function handleColorPickerClick(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const swatch = target.closest(".color-picker__swatch");
+  if (!swatch) return;
+  const color = swatch.dataset.color;
+  const callback = state.colorPickerCallback;
+  colorPicker.hidden = true;
+  state.colorPickerCallback = null;
+  if (callback && callback.onSelect && color) callback.onSelect(color);
+}
+
+// ---------- Resaltado de palabras marcadas ----------
+
+function applyBookmarkHighlights(paragraphElement, paragraph) {
+  if (state.bookmarks.length === 0) return;
+
+  const wordSpans = Array.from(paragraphElement.querySelectorAll(":scope > [data-word-index]"));
+  if (wordSpans.length === 0) return;
+
+  // Mapa: span → color del bookmark que la cubre. Si una palabra cae en varios
+  // marcadores solapados, gana el último creado (consistente con addBookmark).
+  const colorBySpan = new Map();
+  for (const bookmark of state.bookmarks) {
+    if (bookmark.endIndex < paragraph.start) continue;
+    if (bookmark.startIndex >= paragraph.start + paragraph.length) continue;
+    for (const span of wordSpans) {
+      const idx = Number(span.dataset.wordIndex);
+      if (idx >= bookmark.startIndex && idx <= bookmark.endIndex) {
+        colorBySpan.set(span, bookmark.color);
+      }
+    }
+  }
+
+  // Recorre los hijos del párrafo en orden y agrupa runs consecutivos del mismo
+  // color. Las palabras se intercalan con nodos de texto (espacios); los
+  // espacios entre dos palabras del MISMO color se incluyen en el run para que
+  // el fondo no se vea cortado.
+  const children = Array.from(paragraphElement.childNodes);
+  const segments = [];
+  let currentRun = null;
+
+  const flushRun = () => {
+    if (currentRun) {
+      segments.push({ kind: "run", color: currentRun.color, nodes: currentRun.nodes });
+      currentRun = null;
+    }
+  };
+
+  for (let i = 0; i < children.length; i += 1) {
+    const node = children[i];
+    const isWordSpan =
+      node instanceof HTMLElement && node.dataset.wordIndex !== undefined;
+    const color = isWordSpan ? colorBySpan.get(node) || null : null;
+
+    if (color) {
+      if (currentRun && currentRun.color === color) {
+        currentRun.nodes.push(node);
+      } else {
+        flushRun();
+        currentRun = { color, nodes: [node] };
+      }
+      continue;
+    }
+
+    if (
+      currentRun &&
+      node.nodeType === Node.TEXT_NODE &&
+      /^\s+$/u.test(node.textContent || "")
+    ) {
+      const next = children[i + 1];
+      const nextIsSameColor =
+        next instanceof HTMLElement &&
+        next.dataset.wordIndex !== undefined &&
+        colorBySpan.get(next) === currentRun.color;
+      if (nextIsSameColor) {
+        currentRun.nodes.push(node);
+        continue;
+      }
+    }
+
+    flushRun();
+    segments.push({ kind: "plain", node });
+  }
+  flushRun();
+
+  // Si no se generó ningún run, no tocamos el DOM.
+  if (segments.every((segment) => segment.kind === "plain")) return;
+
+  const fragment = document.createDocumentFragment();
+  for (const segment of segments) {
+    if (segment.kind === "plain") {
+      fragment.append(segment.node);
+    } else {
+      const mark = document.createElement("mark");
+      mark.className = `word-text__mark word-text__mark--bookmark word-text__mark--${segment.color}`;
+      for (const inner of segment.nodes) {
+        mark.append(inner);
+      }
+      fragment.append(mark);
+    }
+  }
+  paragraphElement.replaceChildren(fragment);
+}
+
+// ---------- Panel "Marcadores" ----------
+
+function openBookmarksPanel() {
+  if (state.words.length === 0) return;
+  // Asegurar que el panel de texto queda cerrado para no apilar dos paneles a la vez
+  if (state.wordListOpen) closeWordList();
+
+  state.bookmarkPanelOpen = true;
+  bookmarksPanel.hidden = false;
+  bookmarksBackdrop.hidden = false;
+  bookmarksPanel.setAttribute("aria-hidden", "false");
+  bookmarksPanel.setAttribute("aria-modal", "true");
+  document.body.classList.add("no-scroll");
+  renderBookmarksPanel();
+  bookmarksBody.focus();
+}
+
+function closeBookmarksPanel() {
+  if (!state.bookmarkPanelOpen) return;
+
+  state.bookmarkPanelOpen = false;
+  bookmarksPanel.hidden = true;
+  bookmarksBackdrop.hidden = true;
+  bookmarksPanel.setAttribute("aria-hidden", "true");
+  bookmarksPanel.removeAttribute("aria-modal");
+  document.body.classList.remove("no-scroll");
+  if (!playButton.hidden) playButton.focus();
+}
+
+function renderBookmarksPanel() {
+  if (state.bookmarks.length === 0) {
+    bookmarksEmpty.hidden = false;
+    bookmarksBody.replaceChildren();
+    return;
+  }
+  bookmarksEmpty.hidden = true;
+
+  const fragment = document.createDocumentFragment();
+  const grouped = new Map();
+
+  for (const bookmark of state.bookmarks) {
+    const category = state.categories.find((c) => c.id === bookmark.color) || {
+      id: bookmark.color,
+      label: bookmark.color,
+    };
+    if (!grouped.has(category.id)) grouped.set(category.id, { category, items: [] });
+    grouped.get(category.id).items.push(bookmark);
+  }
+
+  // Orden de colores: el orden natural de DEFAULT_CATEGORIES
+  const order = DEFAULT_CATEGORIES.map((c) => c.id);
+  const orderedGroups = Array.from(grouped.values()).sort((a, b) => {
+    return order.indexOf(a.category.id) - order.indexOf(b.category.id);
+  });
+
+  for (const group of orderedGroups) {
+    const groupElement = document.createElement("section");
+    groupElement.className = "bookmarks-group";
+    groupElement.dataset.color = group.category.id;
+
+    const title = document.createElement("h3");
+    title.className = "bookmarks-group__title";
+
+    const chip = document.createElement("span");
+    chip.className = `bookmarks-group__chip bookmark-item__chip--${group.category.id}`;
+    title.append(chip);
+
+    const label = document.createElement("span");
+    label.textContent = group.category.label;
+    title.append(label);
+
+    const count = document.createElement("span");
+    count.className = "bookmarks-group__count";
+    count.textContent = group.items.length === 1
+      ? "1 marcador"
+      : `${group.items.length} marcadores`;
+    title.append(count);
+
+    groupElement.append(title);
+
+    const list = document.createElement("ul");
+    list.className = "bookmarks-list";
+    for (const bookmark of group.items) {
+      list.append(createBookmarkItem(bookmark));
+    }
+    groupElement.append(list);
+    fragment.append(groupElement);
+  }
+
+  bookmarksBody.replaceChildren(fragment);
+}
+
+function createBookmarkItem(bookmark) {
+  const item = document.createElement("li");
+  item.className = "bookmark-item";
+  item.dataset.bookmarkId = bookmark.id;
+
+  const colorChip = document.createElement("button");
+  colorChip.type = "button";
+  colorChip.className = `bookmark-item__chip bookmark-item__chip--${bookmark.color}`;
+  colorChip.dataset.action = "change-color";
+  colorChip.setAttribute("aria-label", "Cambiar color del marcador");
+  colorChip.title = "Cambiar color";
+  item.append(colorChip);
+
+  const body = document.createElement("div");
+  body.className = "bookmark-item__body";
+  body.dataset.action = "jump";
+
+  const text = document.createElement("p");
+  text.className = "bookmark-item__text";
+  text.textContent = bookmarkText(bookmark);
+  body.append(text);
+
+  const meta = document.createElement("span");
+  meta.className = "bookmark-item__meta";
+  const position = bookmark.startIndex + 1;
+  meta.textContent = `Palabra ${numberFormatter.format(position)}`;
+  body.append(meta);
+
+  item.append(body);
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "bookmark-item__delete";
+  deleteButton.dataset.action = "delete";
+  deleteButton.setAttribute("aria-label", "Eliminar marcador");
+  deleteButton.title = "Eliminar";
+  deleteButton.textContent = "×";
+  item.append(deleteButton);
+
+  return item;
+}
+
+function bookmarkText(bookmark) {
+  const slice = state.words.slice(bookmark.startIndex, bookmark.endIndex + 1);
+  const text = slice.join(" ");
+  return text.length > 240 ? `${text.slice(0, 237)}…` : text;
+}
+
+function handleBookmarksBodyClick(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const item = target.closest(".bookmark-item");
+  if (!item) return;
+  const id = item.dataset.bookmarkId;
+  const bookmark = state.bookmarks.find((b) => b.id === id);
+  if (!bookmark) return;
+
+  if (target.closest('[data-action="delete"]')) {
+    const confirmed = window.confirm("¿Eliminar este marcador?");
+    if (confirmed) removeBookmark(id);
+    return;
+  }
+
+  if (target.closest('[data-action="change-color"]')) {
+    const swatch = colorPickerSwatches;
+    const wasOpen = !colorPicker.hidden;
+    if (wasOpen) hideColorPicker();
+    showColorPicker({
+      anchorEl: target,
+      currentColor: bookmark.color,
+      onSelect: (color) => changeBookmarkColor(id, color),
+      onCancel: () => {},
+    });
+    return;
+  }
+
+  if (target.closest('[data-action="jump"]')) {
+    jumpToBookmark(bookmark);
+  }
+}
+
+function jumpToBookmark(bookmark) {
+  closeBookmarksPanel();
+  openWordList();
+  // El panel ya está abierto: saltamos a la palabra del marcador.
+  state.currentIndex = clamp(bookmark.startIndex, 0, state.words.length - 1);
+  renderReader();
+  saveBookProgress();
+  scrollWordListTo(state.currentIndex);
+}
+
+// ---------- Editor de categorías ----------
+
+function openCategoryEditor() {
+  categoryEditor.hidden = false;
+  categoryEditorForm.replaceChildren();
+  for (const category of state.categories) {
+    const row = document.createElement("div");
+    row.className = "category-editor__row";
+
+    const chip = document.createElement("span");
+    chip.className = `category-editor__row__chip category-editor__row__chip--${category.id}`;
+    chip.setAttribute("aria-hidden", "true");
+    row.append(chip);
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "category-editor__row__input";
+    input.value = category.label;
+    input.maxLength = 40;
+    input.dataset.categoryId = category.id;
+    input.setAttribute("aria-label", `Etiqueta para ${category.id}`);
+    row.append(input);
+
+    categoryEditorForm.append(row);
+  }
+  const firstInput = categoryEditorForm.querySelector("input");
+  if (firstInput) firstInput.focus();
+}
+
+function closeCategoryEditor() {
+  categoryEditor.hidden = true;
+}
+
+function handleCategoryEditorSubmit(event) {
+  event.preventDefault();
+  const inputs = categoryEditorForm.querySelectorAll("input[data-category-id]");
+  const updated = DEFAULT_CATEGORIES.map((def) => ({ ...def }));
+
+  for (const input of inputs) {
+    const id = input.dataset.categoryId;
+    const value = input.value.trim();
+    const target = updated.find((c) => c.id === id);
+    if (target) {
+      target.label = value || DEFAULT_CATEGORIES.find((d) => d.id === id).label;
+    }
+  }
+
+  state.categories = updated;
+  persistCategories();
+
+  if (state.bookmarkPanelOpen) {
+    renderBookmarksPanel();
+  }
+  closeCategoryEditor();
 }
